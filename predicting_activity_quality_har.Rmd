@@ -1,0 +1,113 @@
+Predicting Activity Quality From Activity Monitors
+========================================================
+
+## Synopsis
+
+This article describes an application of machine learning in the domain of Human Activity Recognition - HAR.
+
+In particular, the goal is to build a machine learning algorithm that can be used to gives feedback on the *quality* of an executed activity, in this case a barbell lift.
+
+The input data is coming from accelerometers on the belt, forearm, arm, and dumbell of participants asked to perform dumbell lifts correctly and incorrectly in five different ways.
+
+Further details can be found on the website: http://groupware.les.inf.puc-rio.br/har.
+
+This site is also the original source of the training data used in this project.
+
+## Data cleaning and preprocessing
+
+```{r read-data, echo=FALSE, cache=TRUE}
+orig.training <- read.csv("pml-training.csv")
+orig.testing <- read.csv("pml-testing.csv")
+```
+
+The training set data available for [download](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv) has the following dimensions and NA per column distribution.
+```{r analyze-completeness}
+dim(orig.training)
+na.col.distr <- colSums(is.na(orig.training)) # NA count per column
+na.col.distr <- na.col.distr[na.col.distr > 0] # remove columns without NAs
+length(na.col.distr) # number of columns with NAs
+summary(na.col.distr)
+```
+
+We see that for this data set that columns that contain NAs almost entirely consisting of NAs. Such columns can be removed without losing any predictive power. We also remove column 1--7 of the dataset because they contain values that does not appear to be relevant for prediction, such as case ids and time stamps.  
+These 7 columns are the following ones:
+```{r id-columns-to-discard}
+head(names(orig.training),7)
+```
+Finally, we remove what appear to be feature columns, such as `kurtosis_roll_arm`, calculated from actual sensor data, but which consist almost entirely of blanks (ie, missing data), in a distribution similar to that for NA values.
+
+
+```{r clean-data, echo=FALSE}
+# we remove columns containing at least one NA, because they are almost entirely NAs (see above)
+clean.training <- subset(orig.training, select=(1-colSums(is.na(orig.training))) > 0)
+clean.training <- subset(clean.training, select=8:length(clean.training))
+clean.training <- subset(clean.training, select=(1-colSums(clean.training == "")) > 0)
+```
+
+This leaves with a dataset with `r length(clean.training)-1` numeric columns, suitable as predictors, and the outcome column `classe`, which is a 5-level factor variable.
+
+## Feature selection
+
+The number of `r length(clean.training)-1` possible predictors is quite high and it would be desirable to use fewer of them if possible. The following displays the absolute value of the correlation between the input variables.
+
+```{r correlation}
+crl <- unname(abs(cor(clean.training[, 1:52])))
+library(lattice)
+levelplot(crl, labels="", col.regions = gray(seq(1,0,len=100)))
+```
+
+We can conclude that the correlation is not high, and we retain them all as predictors.
+
+## Algorithm design
+
+We will use the Random Forest algorithm because of it's high accuracy. However, due to its long running time in the default bootstrapping mode, we will use repeated resampling mode. In addition, we will perform training on a smaller subset of the
+data, again to keep the running time reasonable while experimenting. When we are happy with the initial results, we can
+repeat the training on a larger set to produce final results.
+
+```{r load-caret-rf, echo=FALSE, results='hide'}
+library(caret)
+library(randomForest)
+```
+
+```{r train, cache=TRUE}
+# use caret package for training, with help of doMC for calculation speedup
+set.seed(7891)
+# subset the dataset, perform training on a smaller part, to keep running time
+# under control while experimenting
+inTrain <- createDataPartition(y = clean.training$classe, p = .2, list = FALSE)
+training <- clean.training[inTrain,]
+dim(training)
+testing <- clean.training[-inTrain,]
+
+# 4-times repeated cross validation
+trControl <- trainControl(method="repeatedcv", number=4)
+
+library(doMC)
+registerDoMC(cores = 3)
+system.time(
+  modelFit <- train(
+    classe ~ .,
+    data=training, method="rf",
+    trControl=trControl)
+)
+```
+
+## Out of sample error rate estimation
+
+We run our model on the remaining data to estimate the out of sample error rate.
+
+```{r test-model}
+preds <- predict(modelFit, newdata=testing)
+```
+The out of sample error estimate is the number of incorrect predictions on the testing set, divided by the total number of prediction attempts.
+
+```{r error-estimate}
+error.est <- sum(preds != testing$classe) / length(preds)
+accuracy <- 1 - error.est
+```
+
+The error estimate is therefore `r round(error.est*100, 2)`%, and the accuracy is `r round(accuracy*100, 2)`%. This agrees with the output of the function `confusionMatrix`.
+
+```{r confmtx}
+confusionMatrix(data=preds, testing$classe)
+```
